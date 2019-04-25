@@ -1,0 +1,229 @@
+---
+title: "Deep Convolutional GAN"
+author: "Michael Rose"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tensorflow)
+library(keras)
+```
+
+# Check GPU Status
+
+```{r}
+K = backend()
+sess = K$get_session()
+sess$list_devices()
+```
+
+
+# Preprocess Data
+
+```{r}
+# get files names
+files <- list.files(path = "~/Desktop/courses/GANs/ff_sprites/all_sprite_imgs")
+
+# set file parameters
+img_height <- 32
+img_width <- 32
+img_channels <- 3
+
+# create tensor array to hold one hot encoded images
+x_train <- array(dim = c(length(files), img_height, img_width, img_channels))
+
+# go through files, one hot encode them and place in tensor array
+for (i in 1:length(files)) {
+    img_loaded <- image_load(paste0("~/Desktop/courses/GANs/ff_sprites/all_sprite_imgs/", files[[i]]), target_size = c(img_height, img_width)) %>% image_to_array(data_format = "channels_last")
+    x_train[i,,,] <- img_loaded
+}
+
+x_train[8,,,]
+
+```
+
+
+# Generator
+
+```{r}
+# set dimensions  
+latent_dim <- 32
+height <- 32
+width <- 32
+channels <- 3
+
+# create input function
+generator_input <- layer_input(shape = c(latent_dim))
+
+# build generator
+generator_output <- generator_input %>% 
+  # downsize
+  layer_dense(units = 128 * 16 * 16) %>% 
+  layer_activation_leaky_relu() %>% 
+  layer_reshape(target_shape = c(16, 16, 128)) %>% 
+  layer_conv_2d(filters = 128, kernel_size = 3,
+                padding = "same") %>% 
+  layer_activation_leaky_relu() %>% 
+  # upsample
+  layer_conv_2d_transpose(filters = 128, kernel_size = 2,
+                          strides = 2, padding = "same") %>% 
+  layer_activation_leaky_relu() %>% 
+  layer_conv_2d(filters = 128, kernel_size = 3, 
+                padding = "same") %>% 
+  layer_activation_leaky_relu() %>% 
+  layer_conv_2d(filters = 128, kernel_size = 3, 
+                padding = "same") %>% 
+  layer_activation_leaky_relu() %>% 
+  # produce output image 
+  layer_conv_2d(filters = channels, kernel_size = 3,
+                activation = "tanh", padding = "same") 
+
+# instantiate generator
+## maps the input shape (latent_dim) into an image of shape h * w * c
+generator <- keras_model(generator_input, generator_output)
+```
+
+# Discriminator 
+
+```{r}
+discriminator_input <- layer_input(shape = c(height, width, channels))
+
+discriminator_output <- discriminator_input %>% 
+  layer_conv_2d(filters = 128, kernel_size = 2) %>% 
+  layer_activation_leaky_relu() %>% 
+  layer_conv_2d(filters = 128, kernel_size = 3, strides = 2) %>% 
+  layer_activation_leaky_relu() %>% 
+  layer_conv_2d(filters = 128, kernel_size = 3, strides = 2) %>% 
+  layer_activation_leaky_relu() %>% 
+  layer_conv_2d(filters = 128, kernel_size = 3, strides = 2) %>% 
+  layer_activation_leaky_relu() %>% 
+  layer_flatten() %>% 
+  layer_dropout(rate = 0.4) %>% 
+  layer_dense(units = 1, activation = "sigmoid")
+
+# instantiate discriminator
+## classifies fake / real
+discriminator <- keras_model(discriminator_input, discriminator_output)
+
+# optimizer
+discriminator_optimizer <- optimizer_rmsprop(
+  lr = 0.0008,
+  # use gradient clipping
+  clipvalue = 1.0, 
+  # use learning rate decay for stabilization
+  decay = 1e-8
+)
+
+# compile discriminator 
+discriminator %>% 
+  compile(
+    optimizer = discriminator_optimizer, 
+    loss = "binary_crossentropy"
+  )
+```
+
+
+# Create Generative Adversarial Network
+
+```{r}
+# freeze weights of discriminator to prevent training
+freeze_weights(discriminator)
+
+# assemble GAN
+gan_input <- layer_input(shape = c(latent_dim))
+gan_output <- discriminator(generator(gan_input))
+gan <- keras_model(gan_input, gan_output)
+
+# set optimizer
+gan_optimizer <- optimizer_rmsprop(
+  lr = 0.0004, 
+  clipvalue = 1.0, 
+  decay = 1e-8
+)
+  
+# compile
+gan %>% compile(
+  optimizer = gan_optimizer, 
+  loss = "binary_crossentropy"
+)
+```
+
+# Train
+
+```{r}
+# normalize data
+x_train <- x_train / 255
+
+x_train[5,,,]
+
+# set parameters 
+iterations <- 100000
+batch_size = 20
+save_dir <- "/home/michael/Desktop/courses/GANs/save"
+```
+
+```{r, eval=FALSE}
+# resume model
+gan <- load_model_weights_hdf5(gan, "dcgan.h5")
+```
+
+
+```{r}
+start <- 1
+
+for (step in 1:iterations) {
+  random_latent_vectors <- matrix(rnorm(batch_size * latent_dim),
+                                  nrow = batch_size, ncol = latent_dim)
+  
+  generated_images <- generator %>% predict(random_latent_vectors)
+  
+  stop <- start + batch_size - 1
+  real_images <- x_train[start:stop,,,]
+  rows <- nrow(real_images)
+  combined_images <- array(0, dim = c(rows * 2, dim(real_images)[-1]))
+  combined_images[1:rows,,,] <- generated_images
+  combined_images[(rows + 1):(rows * 2),,,] <- real_images
+  
+  labels <- rbind(matrix(runif(1, min = 0.9, max = 1), nrow = batch_size, ncol = 1), 
+                  matrix(runif(1, min = 0, max = 0.1), nrow = batch_size, ncol = 1))
+  
+  labels <- labels + (0.5 * array(runif(prod(dim(labels))),
+                                  dim = dim(labels)))
+  
+  d_loss <- discriminator %>% train_on_batch(combined_images, labels)
+  
+  random_latent_vectors <- matrix(rnorm(batch_size * latent_dim),
+                                  nrow = batch_size, ncol = latent_dim)
+  
+  misleading_targets <- array(0, dim = c(batch_size, 1))
+  
+  a_loss <- gan %>% train_on_batch(
+    random_latent_vectors,
+    misleading_targets
+  )
+  
+  start <- start + batch_size
+  
+  if (start > (nrow(x_train) - batch_size)) {
+    start <- 1
+  }
+  
+  if (step %% 100 == 0) {
+    save_model_weights_hdf5(gan, "dcgan.h5")
+    cat("discriminator loss:", d_loss, "\n")
+    cat("adversarial loss:", a_loss, "\n")
+    
+    image_array_save(
+      generated_images[1,,,] * 255,
+      path = file.path(save_dir, paste0("generated_image", step, ".png"))
+    )
+    
+    image_array_save(
+      real_images[1,,,] * 255, 
+      path = file.path(save_dir, paste0("real_image", step, ".png"))
+    )
+  }
+  
+}
+```

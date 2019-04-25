@@ -1,0 +1,249 @@
+  ---
+title: "sprite_scraping"
+author: "Michael Rose"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(rvest)
+library(tidyverse)
+library(furrr)
+
+plan(multiprocess)
+```
+
+# Final Fantasy 1
+
+```{r}
+# grab web pages
+ff_1_urls_list <- c("http://www.videogamesprites.net/FinalFantasy1/Party/Before/", 
+                    "http://www.videogamesprites.net/FinalFantasy1/Party/After/", 
+                    "http://www.videogamesprites.net/FinalFantasy1/NPCs/Individuals/",
+                    "http://www.videogamesprites.net/FinalFantasy1/NPCs/Townsfolk/",
+                    "http://www.videogamesprites.net/FinalFantasy1/NPCs/Nonhuman/",
+                    "http://www.videogamesprites.net/FinalFantasy1/NPCs/Individuals/"
+                    )
+
+# set image download directory
+img_dir <- "~/Desktop/courses/GANs/ff_sprites/ff_1_sprites/"
+
+# Download all the indexed images
+img_download_reg <- as_mapper(function(i){
+  Sys.sleep(5)
+  # state url
+  cat(paste0("Now Downloading From: ", i, "\n---------------\n"))
+  
+  # read html
+  ff_url <- read_html(i)
+  
+  # get images into a list
+  ff_images <- ff_url %>% 
+    html_nodes("a:nth-child(4) , hr~ a") %>% 
+    html_text() %>% as_tibble() %>% 
+    filter(str_detect(value, ".gif"))
+  
+  # download all images 
+  for (j in 1:dim(ff_images)[[1]]) {
+    cat(paste0("Downloading image ", j, " of ", dim(ff_images)[[1]], " : Image Name: ", ff_images$value[j], "\n"))
+    download.file(paste0(i, ff_images$value[j]), paste0(img_dir, ff_images$value[j]), mode = "w", method = "wget", cacheOK = TRUE)
+  }
+}) %>% possibly(otherwise = NA_real_, quiet = TRUE)
+
+# Download all the non indexed images
+img_download_ni <- as_mapper(function(i){
+  Sys.sleep(5) 
+
+  # state url
+  cat(paste0("Now Downloading From: ", i, "\n---------------\n"))
+  
+  # read html
+  ff_url <- read_html(i)
+  
+  # get images into a list
+  ff_images <- ff_url %>% 
+    html_nodes("img") %>%
+    html_attr("src") %>% as_tibble() %>% 
+    filter(str_detect(value, ".gif"))
+  
+  # download all images 
+  for (j in 1:dim(ff_images)[[1]]) {
+    cat(paste0("Downloading image ", j, " of ", dim(ff_images)[[1]], " : Image Name: ", ff_images$value[j], "\n"))
+    download.file(paste0(i, ff_images$value[j]), paste0(img_dir, ff_images$value[j]), mode = "w", method = "wget", cacheOK = TRUE)
+  }
+}) %>% possibly(otherwise = NA_real_, quiet = TRUE)
+
+
+# download all of the images
+future_walk(.x = ff_1_urls_list, .f = img_download_reg)
+```
+
+Next we want to convert each animated gif file into a series of png files. For this, I will use a simple bash script: 
+
+```{r, engine = bash. eval = FALSE}
+convert *.gif *.png
+
+find . -name \*.png -exec cp {} all_sprite_imgs \;
+
+for file in *png; do mv "$file" "${file:2}"; done
+```
+
+# Final Fantasy 2
+
+```{r}
+# grab non indexed web pages
+ff_2_url_non_index <- "http://www.videogamesprites.net/FinalFantasy2/Party/"
+
+# grab web pages
+ff_2_urls_list <- c("http://www.videogamesprites.net/FinalFantasy2/NPCs/Individuals/",
+               "http://www.videogamesprites.net/FinalFantasy2/NPCs/Townsfolk/")
+
+
+# set image download directory
+img_dir <- "~/Desktop/courses/GANs/ff_sprites/ff_2_sprites/"
+
+# download indexed images
+future_walk(ff_2_urls_list, img_download_reg)
+
+# download non indexed images
+future_walk(ff_2_url_non_index, img_download_ni)
+```
+
+# Final Fantasy 3
+
+```{r}
+# grab non indexed web pages
+ff_3_url_non_index <- c("http://www.videogamesprites.net/FinalFantasy3/Party/OnionKnight/")
+
+# grab web pages 
+ff_3_urls_list <- c(
+"http://www.videogamesprites.net/FinalFantasy3/Party/Fire/",
+"http://www.videogamesprites.net/FinalFantasy3/Party/Earth/",
+"http://www.videogamesprites.net/FinalFantasy3/Party/Status/",
+"http://www.videogamesprites.net/FinalFantasy3/Party/Wind/",
+"http://www.videogamesprites.net/FinalFantasy3/Party/Water/",
+"http://www.videogamesprites.net/FinalFantasy3/Party/Eureka/",
+"http://www.videogamesprites.net/FinalFantasy3/NPCs/Individuals/",
+"http://www.videogamesprites.net/FinalFantasy3/NPCs/Townsfolk/",
+"http://www.videogamesprites.net/FinalFantasy3/NPCs/Nonhuman/"
+)
+
+# set image download directory
+img_dir <- "~/Desktop/courses/GANs/ff_sprites/ff_3_sprites/"
+
+# download indexed
+future_walk(ff_3_urls_list, img_download_reg, .progress = TRUE)
+
+# download non indexed 
+future_walk(ff_3_url_non_index, img_download_ni, .progress = TRUE)
+```
+
+# Final Fantasy 4
+
+```{r}
+ff_4_urls_non_index <- c(
+  "http://www.videogamesprites.net/FinalFantasy4/Party/Cecil/",
+  "http://www.videogamesprites.net/FinalFantasy4/Party/Kain/",
+  "http://www.videogamesprites.net/FinalFantasy4/Party/Rydia/",
+  "http://www.videogamesprites.net/FinalFantasy4/Party/Rosa/",
+  "http://www.videogamesprites.net/FinalFantasy4/Party/Edge/",
+  "http://www.videogamesprites.net/FinalFantasy4/Party/Tellah/",
+  "http://www.videogamesprites.net/FinalFantasy4/Party/Edward/",
+  "http://www.videogamesprites.net/FinalFantasy4/Party/Yang/",
+  "http://www.videogamesprites.net/FinalFantasy4/Party/Palom/",
+  "http://www.videogamesprites.net/FinalFantasy4/Party/Porom/",
+  "http://www.videogamesprites.net/FinalFantasy4/Party/Cid/",
+  "http://www.videogamesprites.net/FinalFantasy4/Party/FuSoYa/"
+)
+
+ff_4_urls_list <- c(
+  "http://www.videogamesprites.net/FinalFantasy4/NPCs/Individuals/",
+  "http://www.videogamesprites.net/FinalFantasy4/NPCs/Townsfolk/",
+  "http://www.videogamesprites.net/FinalFantasy4/NPCs/Nonhuman/"
+)
+
+img_dir <- "~/Desktop/courses/GANs/ff_sprites/ff_4_sprites/"
+
+# download indexed
+future_walk(ff_4_urls_list, img_download_reg, .progress = TRUE)
+
+# download non indexed
+future_walk(ff_4_urls_non_index, img_download_ni, .progress = TRUE)
+```
+
+# Final Fantasy 5
+
+```{r}
+ff_5_urls_list <- c(
+  "http://www.videogamesprites.net/FinalFantasy5/Party/Freelancer/",
+  "http://www.videogamesprites.net/FinalFantasy5/Party/Water/",
+  "http://www.videogamesprites.net/FinalFantasy5/Party/Earth/",
+  "http://www.videogamesprites.net/FinalFantasy5/Party/Wind/",
+  "http://www.videogamesprites.net/FinalFantasy5/Party/Fire/",
+  "http://www.videogamesprites.net/FinalFantasy5/Party/Other/",
+  "http://www.videogamesprites.net/FinalFantasy5/NPCs/Individuals/",
+  "http://www.videogamesprites.net/FinalFantasy5/NPCs/Townsfolk/",
+  "http://www.videogamesprites.net/FinalFantasy5/NPCs/Nonhuman/"
+)
+
+
+img_dir <- "~/Desktop/courses/GANs/ff_sprites/ff_5_sprites/"
+
+# download indexed
+future_walk(ff_5_urls_list, img_download_reg, .progress = TRUE)
+```
+
+# Final Fantasy 6
+
+```{r}
+ff_6_urls_non_index <- c(
+  "http://www.videogamesprites.net/FinalFantasy6/Party/Terra/",
+  "http://www.videogamesprites.net/FinalFantasy6/Party/Locke/",
+  "http://www.videogamesprites.net/FinalFantasy6/Party/Edgar/",
+  "http://www.videogamesprites.net/FinalFantasy6/Party/Sabin/",
+  "http://www.videogamesprites.net/FinalFantasy6/Party/Celes/",
+  "http://www.videogamesprites.net/FinalFantasy6/Party/Shadow/",
+  "http://www.videogamesprites.net/FinalFantasy6/Party/Cyan/",
+  "http://www.videogamesprites.net/FinalFantasy6/Party/Gau/",
+  "http://www.videogamesprites.net/FinalFantasy6/Party/Setzer/",
+  "http://www.videogamesprites.net/FinalFantasy6/Party/Mog/",
+  "http://www.videogamesprites.net/FinalFantasy6/Party/Strago/",
+  "http://www.videogamesprites.net/FinalFantasy6/Party/Relm/",
+  "http://www.videogamesprites.net/FinalFantasy6/Party/Gogo/",
+  "http://www.videogamesprites.net/FinalFantasy6/Party/Umaro/",
+  "http://www.videogamesprites.net/FinalFantasy6/Party/Vicks/",
+  "http://www.videogamesprites.net/FinalFantasy6/Party/Banon/",
+  "http://www.videogamesprites.net/FinalFantasy6/Party/Ghost/",
+  "http://www.videogamesprites.net/FinalFantasy6/Party/GeneralLeo/", 
+  "http://www.videogamesprites.net/FinalFantasy6/Party/Imp/"
+)
+
+ff_6_urls_list <- c(
+  "http://www.videogamesprites.net/FinalFantasy6/NPCs/Returners/",
+  "http://www.videogamesprites.net/FinalFantasy6/NPCs/Other/",
+  "http://www.videogamesprites.net/FinalFantasy6/NPCs/Nonhuman/",
+  "http://www.videogamesprites.net/FinalFantasy6/NPCs/Empire/",
+  "http://www.videogamesprites.net/FinalFantasy6/NPCs/Townsfolk/"
+)
+
+
+img_dir <- "~/Desktop/courses/GANs/ff_sprites/ff_6_sprites/"
+
+# download indexed
+future_walk(ff_6_urls_list, img_download_reg, .progress = TRUE)
+
+# download non indexed
+future_walk(ff_6_urls_non_index, img_download_ni, .progress = TRUE)
+```
+
+Placing a copy of all the png files into a pooled directory
+
+```{r, engine = bash, eval = FALSE}
+find . -name \*.png -exec cp {} all_sprite_imgs \;
+```
+
+Now there is just a bit more cleaning to do. The earlier bash script to break gifs into their constituent frames left us with a bunch of *-file_name.png files. I wish to remove the first two characters. 
+
+```{r, engine = bash, eval = FALSE}
+for file in *png; do mv "$file" "${file:2}"; done
+```
