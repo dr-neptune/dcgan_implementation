@@ -1,0 +1,2130 @@
+---
+title: "Generative Adversarial Networks"
+author: "Michael Rose"
+output: 
+  html_document:
+    theme: darkly
+    highlight: zenburn
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, eval = FALSE)
+
+# scraping
+library(rvest)
+library(tidyverse)
+library(furrr)
+plan(multiprocess)
+
+# DCGAN
+library(tensorflow)
+library(keras)
+```
+
+# {.tabset}
+
+## Intro
+
+### Abstract
+
+Generative Adversarial Networks are a class of machine learning algorithms which have the ability to learn rich, hierarchical probability distributions over a variety of different data types. This is achieved by simultaneously training two neural networks and pitting them against each other in an adversarial framework. This project implements a GAN that generates sprites from early final fantasy games.
+
+### Generative Adversarial Networks: Optimization
+
+Given two neural networks, we can learn the probability distribution of some data by having them compete against each other. We have two different networks: one is a discriminative model and one is a generative model. The generative model looks at the data, and then tries to make a new data point given what it has seen. The discriminator then judges the new data point by assigning a probability that the new data is from the original data set or not. Then, based on this judgement, the generator and discriminator both update their weights.
+
+Over time, the generated data gets better. We can think of GANs as a methodology for minimizing a loss function by optimizing weights to approximate a high dimensional probability manifold. Then, once we have that manifold, we can sample it for new data. 
+
+![](GAN_Optimization.png)
+
+In the image above: 
+
+- The black dotted distribution is the true data generating function
+
+- The green distribution is the generative model
+
+- The dotted blue line is the decision boundary (accept / reject) for the discriminator
+
+- The arrows below the distributions show where the latent variables map to on the x axis
+
+-----
+
+### Analogy
+
+To make things more concrete, here is an analogy:
+
+Suppose we have two people, a currency expert and a counterfeiter. The expert has a nice
+office job at a bank where they regularly take samples of the local currency and check for
+fakes. The counterfeiter also has an nice office job at the same bank, but their salary is not
+nearly as nice as the experts! Given that the counterfeiter fancies themselves to be rather
+clever, they decide to make their own fortune and begin designing and printing fake currency.
+
+The expert is pretty good at telling the difference between real and fake money already, but
+has room to improve. The counterfeiter on the other hand, is completely new to making
+fake money and must learn attention to detail. The first time the counterfeiter tries to pass
+off their work as real currency, there is a very low probability that the expert won’t be able
+to tell. As a result, the expert finds some of the fake money in their weekly inspection
+batch and decides the best thing to do would be to throw a tantrum. The counterfeiter,
+overhearing their coworker’s lament (the expert is a real loudmouth), goes home and works
+through some youtube tutorials on photoshop.
+
+The next week, the counterfeiter releases another batch of fake money (after some lessons)
+into the local economy and it eventually ends up in front of the expert. The expert notices
+that the detail work has gotten better, but is still fairly certain that the currency is fake. The
+counterfeiter, not deterred goes home and works through more youtube photoshop tutorials.
+In the process of judging these fake currencies, the expert is also learning more about what
+to look for to tell real money from fake money.
+
+After many iterations of judgement and training, the counterfeiter releases another batch
+of fake money into their local economy. This time, the expert (who is now truly deserving
+of the title expert), is stumped and assumes that all the money in their inspection batch is
+real. The game between the counterfeiter and the expert has gotten to the point where the
+counterfeiter is so good at making fake money that the expert can not tell real money apart
+from the fake money. Similarly, the counterfeiter is so good at making fake money, there is
+likely no better counterfeiter in the world.
+
+Hence, they have reached an equilibrium in which the counterfeiter has minimized the chance
+that the expert can tell their fakes. Similarly, the expert has maximized their ability to tell
+the difference between real and fake currency. As a result, the counterfeiter gets obscenely
+wealthy and the expert loses their job for allowing so much fake currency to permeate through
+the local economy.
+
+
+-----
+
+### High Dimensional Data
+
+Since GANs are made of neural networks, they can learn probability distributions in very high dimensional space. This includes things like corpuses of text, music, images, and video. As an example of images, here is an example from NVidia Research in which they trained a GAN on 20 million + images of faces over the course of about a month: 
+
+![](gan_faces.png)
+
+In order to illustrate that these are still just points sampled from a high dimensional probability distribution, here is an image of samples being pulled from a local neighborhood: 
+
+<center>
+![](face_grow.gif)
+</center>
+
+-----
+
+
+## Scraping
+
+GANs are computationally intensive to train. Given my limitations on computing power (4 gb of video card RAM), and time (Nvidia trained for over a month), I wanted to find some data that would have the following properties:
+
+- Small natural size (28 * 28 pixels)
+  - Note this is still high dimensional data: (28 * 28 * 255^3 = `r 28 * 28 * 255^3` distinct points embedded in a tensor)
+- Good criteria for correctness
+
+As a result I chose sprites from the early final fantasy games. They are naturally about 30 * 30 pixels (so criteria 1 holds). They also fit criteria 2 because they always have a black outline to seperate them from their environment and they tend to have a humanoid-esque shape to them. 
+
+In order to get this data, I had to scrape it from the internet as it could not be found. I took images from [Video Game Sprites](videogamesprites.net) from the first 6 final fantasy games. In order to make the data more uniform, I only scraped the human characters. 
+
+In total 11277 sprite gifs were scraped. Since they are gifs, I could use bash scripting to seperate each gif into its constituent frames. In the end, after removing duplicate frames, I was left with 15392 images overall. In order to make the scraping effective, all operations were done using functional programming in such a way as to do everything in parallel across 6 cores (12 threads). In order to be kinder to the server, I set a time between each scrape so the server didn't feel like it was being attacked. 
+
+### Final Fantasy 1
+
+```{r}
+# grab web pages
+ff_1_urls_list <- c("http://www.videogamesprites.net/FinalFantasy1/Party/Before/", 
+                    "http://www.videogamesprites.net/FinalFantasy1/Party/After/", 
+                    "http://www.videogamesprites.net/FinalFantasy1/NPCs/Individuals/",
+                    "http://www.videogamesprites.net/FinalFantasy1/NPCs/Townsfolk/",
+                    "http://www.videogamesprites.net/FinalFantasy1/NPCs/Nonhuman/",
+                    "http://www.videogamesprites.net/FinalFantasy1/NPCs/Individuals/"
+                    )
+
+# set image download directory
+img_dir <- "~/Desktop/courses/GANs/ff_sprites/ff_1_sprites/"
+
+# Download all the indexed images
+img_download_reg <- as_mapper(function(i){
+  Sys.sleep(5)
+  # state url
+  cat(paste0("Now Downloading From: ", i, "\n---------------\n"))
+  
+  # read html
+  ff_url <- read_html(i)
+  
+  # get images into a list
+  ff_images <- ff_url %>% 
+    html_nodes("a:nth-child(4) , hr~ a") %>% 
+    html_text() %>% as_tibble() %>% 
+    filter(str_detect(value, ".gif"))
+  
+  # download all images 
+  for (j in 1:dim(ff_images)[[1]]) {
+    cat(paste0("Downloading image ", j, " of ", dim(ff_images)[[1]], 
+               " : Image Name: ", ff_images$value[j], "\n"))
+    download.file(paste0(i, ff_images$value[j]), paste0(img_dir, ff_images$value[j]),
+                  mode = "w", method = "wget", cacheOK = TRUE)
+  }
+}) %>% possibly(otherwise = NA_real_, quiet = TRUE)
+
+# Download all the non indexed images
+img_download_ni <- as_mapper(function(i){
+  Sys.sleep(5) 
+
+  # state url
+  cat(paste0("Now Downloading From: ", i, "\n---------------\n"))
+  
+  # read html
+  ff_url <- read_html(i)
+  
+  # get images into a list
+  ff_images <- ff_url %>% 
+    html_nodes("img") %>%
+    html_attr("src") %>% as_tibble() %>% 
+    filter(str_detect(value, ".gif"))
+  
+  # download all images 
+  for (j in 1:dim(ff_images)[[1]]) {
+    cat(paste0("Downloading image ", j, " of ", dim(ff_images)[[1]], " : Image Name: ", ff_images$value[j], "\n"))
+    download.file(paste0(i, ff_images$value[j]), paste0(img_dir, ff_images$value[j]), mode = "w", method = "wget", cacheOK = TRUE)
+  }
+}) %>% possibly(otherwise = NA_real_, quiet = TRUE)
+
+
+# download all of the images
+future_walk(.x = ff_1_urls_list, .f = img_download_reg)
+```
+
+Next we want to convert each animated gif file into a series of png files. For this, I will use a simple bash script: 
+
+```{r, engine = 'bash', eval = FALSE}
+convert *.gif *.png
+
+find . -name \*.png -exec cp {} all_sprite_imgs \;
+
+for file in *png; do mv "$file" "${file:2}"; done
+```
+
+### Final Fantasy 2
+
+```{r}
+# grab non indexed web pages
+ff_2_url_non_index <- "http://www.videogamesprites.net/FinalFantasy2/Party/"
+
+# grab web pages
+ff_2_urls_list <- c("http://www.videogamesprites.net/FinalFantasy2/NPCs/Individuals/",
+               "http://www.videogamesprites.net/FinalFantasy2/NPCs/Townsfolk/")
+
+
+# set image download directory
+img_dir <- "~/Desktop/courses/GANs/ff_sprites/ff_2_sprites/"
+
+# download indexed images
+future_walk(ff_2_urls_list, img_download_reg)
+
+# download non indexed images
+future_walk(ff_2_url_non_index, img_download_ni)
+```
+
+### Final Fantasy 3
+
+```{r}
+# grab non indexed web pages
+ff_3_url_non_index <- c("http://www.videogamesprites.net/FinalFantasy3/Party/OnionKnight/")
+
+# grab web pages 
+ff_3_urls_list <- c(
+"http://www.videogamesprites.net/FinalFantasy3/Party/Fire/",
+"http://www.videogamesprites.net/FinalFantasy3/Party/Earth/",
+"http://www.videogamesprites.net/FinalFantasy3/Party/Status/",
+"http://www.videogamesprites.net/FinalFantasy3/Party/Wind/",
+"http://www.videogamesprites.net/FinalFantasy3/Party/Water/",
+"http://www.videogamesprites.net/FinalFantasy3/Party/Eureka/",
+"http://www.videogamesprites.net/FinalFantasy3/NPCs/Individuals/",
+"http://www.videogamesprites.net/FinalFantasy3/NPCs/Townsfolk/",
+"http://www.videogamesprites.net/FinalFantasy3/NPCs/Nonhuman/"
+)
+
+# set image download directory
+img_dir <- "~/Desktop/courses/GANs/ff_sprites/ff_3_sprites/"
+
+# download indexed
+future_walk(ff_3_urls_list, img_download_reg, .progress = TRUE)
+
+# download non indexed 
+future_walk(ff_3_url_non_index, img_download_ni, .progress = TRUE)
+```
+
+### Final Fantasy 4
+
+```{r}
+ff_4_urls_non_index <- c(
+  "http://www.videogamesprites.net/FinalFantasy4/Party/Cecil/",
+  "http://www.videogamesprites.net/FinalFantasy4/Party/Kain/",
+  "http://www.videogamesprites.net/FinalFantasy4/Party/Rydia/",
+  "http://www.videogamesprites.net/FinalFantasy4/Party/Rosa/",
+  "http://www.videogamesprites.net/FinalFantasy4/Party/Edge/",
+  "http://www.videogamesprites.net/FinalFantasy4/Party/Tellah/",
+  "http://www.videogamesprites.net/FinalFantasy4/Party/Edward/",
+  "http://www.videogamesprites.net/FinalFantasy4/Party/Yang/",
+  "http://www.videogamesprites.net/FinalFantasy4/Party/Palom/",
+  "http://www.videogamesprites.net/FinalFantasy4/Party/Porom/",
+  "http://www.videogamesprites.net/FinalFantasy4/Party/Cid/",
+  "http://www.videogamesprites.net/FinalFantasy4/Party/FuSoYa/"
+)
+
+ff_4_urls_list <- c(
+  "http://www.videogamesprites.net/FinalFantasy4/NPCs/Individuals/",
+  "http://www.videogamesprites.net/FinalFantasy4/NPCs/Townsfolk/",
+  "http://www.videogamesprites.net/FinalFantasy4/NPCs/Nonhuman/"
+)
+
+img_dir <- "~/Desktop/courses/GANs/ff_sprites/ff_4_sprites/"
+
+# download indexed
+future_walk(ff_4_urls_list, img_download_reg, .progress = TRUE)
+
+# download non indexed
+future_walk(ff_4_urls_non_index, img_download_ni, .progress = TRUE)
+```
+
+### Final Fantasy 5
+
+```{r}
+ff_5_urls_list <- c(
+  "http://www.videogamesprites.net/FinalFantasy5/Party/Freelancer/",
+  "http://www.videogamesprites.net/FinalFantasy5/Party/Water/",
+  "http://www.videogamesprites.net/FinalFantasy5/Party/Earth/",
+  "http://www.videogamesprites.net/FinalFantasy5/Party/Wind/",
+  "http://www.videogamesprites.net/FinalFantasy5/Party/Fire/",
+  "http://www.videogamesprites.net/FinalFantasy5/Party/Other/",
+  "http://www.videogamesprites.net/FinalFantasy5/NPCs/Individuals/",
+  "http://www.videogamesprites.net/FinalFantasy5/NPCs/Townsfolk/",
+  "http://www.videogamesprites.net/FinalFantasy5/NPCs/Nonhuman/"
+)
+
+
+img_dir <- "~/Desktop/courses/GANs/ff_sprites/ff_5_sprites/"
+
+# download indexed
+future_walk(ff_5_urls_list, img_download_reg, .progress = TRUE)
+```
+
+### Final Fantasy 6
+
+```{r}
+ff_6_urls_non_index <- c(
+  "http://www.videogamesprites.net/FinalFantasy6/Party/Terra/",
+  "http://www.videogamesprites.net/FinalFantasy6/Party/Locke/",
+  "http://www.videogamesprites.net/FinalFantasy6/Party/Edgar/",
+  "http://www.videogamesprites.net/FinalFantasy6/Party/Sabin/",
+  "http://www.videogamesprites.net/FinalFantasy6/Party/Celes/",
+  "http://www.videogamesprites.net/FinalFantasy6/Party/Shadow/",
+  "http://www.videogamesprites.net/FinalFantasy6/Party/Cyan/",
+  "http://www.videogamesprites.net/FinalFantasy6/Party/Gau/",
+  "http://www.videogamesprites.net/FinalFantasy6/Party/Setzer/",
+  "http://www.videogamesprites.net/FinalFantasy6/Party/Mog/",
+  "http://www.videogamesprites.net/FinalFantasy6/Party/Strago/",
+  "http://www.videogamesprites.net/FinalFantasy6/Party/Relm/",
+  "http://www.videogamesprites.net/FinalFantasy6/Party/Gogo/",
+  "http://www.videogamesprites.net/FinalFantasy6/Party/Umaro/",
+  "http://www.videogamesprites.net/FinalFantasy6/Party/Vicks/",
+  "http://www.videogamesprites.net/FinalFantasy6/Party/Banon/",
+  "http://www.videogamesprites.net/FinalFantasy6/Party/Ghost/",
+  "http://www.videogamesprites.net/FinalFantasy6/Party/GeneralLeo/", 
+  "http://www.videogamesprites.net/FinalFantasy6/Party/Imp/"
+)
+
+ff_6_urls_list <- c(
+  "http://www.videogamesprites.net/FinalFantasy6/NPCs/Returners/",
+  "http://www.videogamesprites.net/FinalFantasy6/NPCs/Other/",
+  "http://www.videogamesprites.net/FinalFantasy6/NPCs/Nonhuman/",
+  "http://www.videogamesprites.net/FinalFantasy6/NPCs/Empire/",
+  "http://www.videogamesprites.net/FinalFantasy6/NPCs/Townsfolk/"
+)
+
+
+img_dir <- "~/Desktop/courses/GANs/ff_sprites/ff_6_sprites/"
+
+# download indexed
+future_walk(ff_6_urls_list, img_download_reg, .progress = TRUE)
+
+# download non indexed
+future_walk(ff_6_urls_non_index, img_download_ni, .progress = TRUE)
+```
+
+### Bash Scripts
+
+Placing a copy of all the png files into a pooled directory
+
+```{r, engine = 'bash', eval = FALSE}
+find . -name \*.png -exec cp {} all_sprite_imgs \;
+```
+
+Now there is just a bit more cleaning to do. The earlier bash script to break gifs into their constituent frames left us with a bunch of *-file_name.png files. I wish to remove the first two characters. 
+
+```{r, engine = 'bash', eval = FALSE}
+for file in *png; do mv "$file" "${file:2}"; done
+```
+
+
+## Data Sample
+
+Here is a sample of some of the gifs: 
+
+### Final Fantasy 1
+
+![](ff1_1.gif)
+![](ff1_2.gif)
+![](ff1_3.gif)
+![](ff1_4.gif)
+![](ff1_5.gif)
+
+### Final Fantasy 2
+
+![](ff2_1.gif)
+![](ff2_2.gif)
+![](ff2_3.gif)
+![](ff2_4.gif)
+![](ff2_5.gif)
+
+
+### Final Fantasy 3
+
+![](ff3_1.gif)
+![](ff3_2.gif)
+![](ff3_3.gif)
+![](ff3_4.gif)
+![](ff3_5.gif)
+
+
+### Final Fantasy 4
+
+![](ff4_1.gif)
+![](ff4_2.gif)
+![](ff4_3.gif)
+![](ff4_4.gif)
+![](ff4_5.gif)
+
+
+### Final Fantasy 5
+
+![](ff5_1.gif)
+![](ff5_2.gif)
+![](ff5_3.gif)
+![](ff5_4.gif)
+![](ff5_5.gif)
+
+
+### Final Fantasy 6
+
+![](ff6_1.gif)
+![](ff6_2.gif)
+![](ff6_3.gif)
+![](ff6_4.gif)
+![](ff6_5.gif)
+
+
+## Deep Convolutional GAN
+
+
+Here is the architecture that was built below: 
+
+
+![](gan.png)
+
+### Check GPU Status
+
+```{r}
+K = backend()
+sess = K$get_session()
+sess$list_devices()
+```
+
+
+### Preprocess Data
+
+```{r}
+# get files names
+files <- list.files(path = "~/Desktop/courses/GANs/ff_sprites/all_sprite_imgs")
+
+# set file parameters
+img_height <- 32
+img_width <- 32
+img_channels <- 3
+
+# create tensor array to hold one hot encoded images
+x_train <- array(dim = c(length(files), img_height, img_width, img_channels))
+
+# go through files, one hot encode them and place in tensor array
+for (i in 1:length(files)) {
+    img_loaded <- image_load(paste0("~/Desktop/courses/GANs/ff_sprites/all_sprite_imgs/",
+                                    files[[i]]), target_size = c(img_height, img_width)) %>%
+      image_to_array(data_format = "channels_last")
+    x_train[i,,,] <- img_loaded
+}
+
+x_train[8,,,]
+```
+
+
+### Generator
+
+```{r}
+# set dimensions  
+latent_dim <- 32
+height <- 32
+width <- 32
+channels <- 3
+
+# create input function
+generator_input <- layer_input(shape = c(latent_dim))
+
+# build generator
+generator_output <- generator_input %>% 
+  # downsize
+  layer_dense(units = 128 * 16 * 16) %>% 
+  layer_activation_leaky_relu() %>% 
+  layer_reshape(target_shape = c(16, 16, 128)) %>% 
+  layer_conv_2d(filters = 128, kernel_size = 3,
+                padding = "same") %>% 
+  layer_activation_leaky_relu() %>% 
+  # upsample
+  layer_conv_2d_transpose(filters = 128, kernel_size = 2,
+                          strides = 2, padding = "same") %>% 
+  layer_activation_leaky_relu() %>% 
+  layer_conv_2d(filters = 128, kernel_size = 3, 
+                padding = "same") %>% 
+  layer_activation_leaky_relu() %>% 
+  layer_conv_2d(filters = 128, kernel_size = 3, 
+                padding = "same") %>% 
+  layer_activation_leaky_relu() %>% 
+  # produce output image 
+  layer_conv_2d(filters = channels, kernel_size = 3,
+                activation = "tanh", padding = "same") 
+
+# instantiate generator
+## maps the input shape (latent_dim) into an image of shape h * w * c
+generator <- keras_model(generator_input, generator_output)
+```
+
+### Discriminator 
+
+```{r}
+discriminator_input <- layer_input(shape = c(height, width, channels))
+
+discriminator_output <- discriminator_input %>% 
+  layer_conv_2d(filters = 128, kernel_size = 2) %>% 
+  layer_activation_leaky_relu() %>% 
+  layer_conv_2d(filters = 128, kernel_size = 3, strides = 2) %>% 
+  layer_activation_leaky_relu() %>% 
+  layer_conv_2d(filters = 128, kernel_size = 3, strides = 2) %>% 
+  layer_activation_leaky_relu() %>% 
+  layer_conv_2d(filters = 128, kernel_size = 3, strides = 2) %>% 
+  layer_activation_leaky_relu() %>% 
+  layer_flatten() %>% 
+  layer_dropout(rate = 0.4) %>% 
+  layer_dense(units = 1, activation = "sigmoid")
+
+# instantiate discriminator
+## classifies fake / real
+discriminator <- keras_model(discriminator_input, discriminator_output)
+
+# optimizer
+discriminator_optimizer <- optimizer_rmsprop(
+  lr = 0.0008,
+  # use gradient clipping
+  clipvalue = 1.0, 
+  # use learning rate decay for stabilization
+  decay = 1e-8
+)
+
+# compile discriminator 
+discriminator %>% 
+  compile(
+    optimizer = discriminator_optimizer, 
+    loss = "binary_crossentropy"
+  )
+```
+
+
+### Create Generative Adversarial Network
+
+```{r}
+# freeze weights of discriminator to prevent training
+freeze_weights(discriminator)
+
+# assemble GAN
+gan_input <- layer_input(shape = c(latent_dim))
+gan_output <- discriminator(generator(gan_input))
+gan <- keras_model(gan_input, gan_output)
+
+# set optimizer
+gan_optimizer <- optimizer_rmsprop(
+  lr = 0.0004, 
+  clipvalue = 1.0, 
+  decay = 1e-8
+)
+  
+# compile
+gan %>% compile(
+  optimizer = gan_optimizer, 
+  loss = "binary_crossentropy"
+)
+```
+
+### Train
+
+```{r}
+# normalize data
+x_train <- x_train / 255
+
+x_train[5,,,]
+
+# set parameters 
+iterations <- 100000
+batch_size = 20
+save_dir <- "/home/michael/Desktop/courses/GANs/save"
+```
+
+```{r, eval=FALSE}
+# resume model
+gan <- load_model_weights_hdf5(gan, "dcgan.h5")
+```
+
+
+```{r}
+start <- 1
+
+for (step in 1:iterations) {
+  random_latent_vectors <- matrix(rnorm(batch_size * latent_dim),
+                                  nrow = batch_size, ncol = latent_dim)
+  
+  generated_images <- generator %>% predict(random_latent_vectors)
+  
+  stop <- start + batch_size - 1
+  real_images <- x_train[start:stop,,,]
+  rows <- nrow(real_images)
+  combined_images <- array(0, dim = c(rows * 2, dim(real_images)[-1]))
+  combined_images[1:rows,,,] <- generated_images
+  combined_images[(rows + 1):(rows * 2),,,] <- real_images
+  
+  labels <- rbind(matrix(runif(1, min = 0.9, max = 1), nrow = batch_size, ncol = 1), 
+                  matrix(runif(1, min = 0, max = 0.1), nrow = batch_size, ncol = 1))
+  
+  labels <- labels + (0.5 * array(runif(prod(dim(labels))),
+                                  dim = dim(labels)))
+  
+  d_loss <- discriminator %>% train_on_batch(combined_images, labels)
+  
+  random_latent_vectors <- matrix(rnorm(batch_size * latent_dim),
+                                  nrow = batch_size, ncol = latent_dim)
+  
+  misleading_targets <- array(0, dim = c(batch_size, 1))
+  
+  a_loss <- gan %>% train_on_batch(
+    random_latent_vectors,
+    misleading_targets
+  )
+  
+  start <- start + batch_size
+  
+  if (start > (nrow(x_train) - batch_size)) {
+    start <- 1
+  }
+  
+  if (step %% 100 == 0) {
+    save_model_weights_hdf5(gan, "dcgan.h5")
+    cat("discriminator loss:", d_loss, "\n")
+    cat("adversarial loss:", a_loss, "\n")
+    
+    image_array_save(
+      generated_images[1,,,] * 255,
+      path = file.path(save_dir, paste0("generated_image", step, ".png"))
+    )
+    
+    image_array_save(
+      real_images[1,,,] * 255, 
+      path = file.path(save_dir, paste0("real_image", step, ".png"))
+    )
+  }
+  
+}
+```
+
+
+## Output
+
+### Early Stages
+
+```{r, eval = FALSE, echo = FALSE}
+early_images <- list.files("early/")
+
+for (i in early_images) {
+  file <- glue::glue("![](early/{i})\n")
+  print(file)
+}
+```
+
+
+![](early/generated_image100.jpg)
+![](early/generated_image1000.jpg)
+![](early/generated_image10000.jpg)
+![](early/generated_image10100.jpg)
+![](early/generated_image10200.jpg)
+![](early/generated_image10300.jpg)
+![](early/generated_image10400.jpg)
+![](early/generated_image10500.jpg)
+![](early/generated_image10600.jpg)
+![](early/generated_image10700.jpg)
+![](early/generated_image10800.jpg)
+![](early/generated_image10900.jpg)
+![](early/generated_image1100.jpg)
+![](early/generated_image11000.jpg)
+![](early/generated_image11100.jpg)
+![](early/generated_image11200.jpg)
+![](early/generated_image11300.jpg)
+![](early/generated_image11400.jpg)
+![](early/generated_image11500.jpg)
+![](early/generated_image11600.jpg)
+![](early/generated_image11700.jpg)
+![](early/generated_image11800.jpg)
+![](early/generated_image11900.jpg)
+![](early/generated_image1200.jpg)
+![](early/generated_image12000.jpg)
+![](early/generated_image12100.jpg)
+![](early/generated_image12200.jpg)
+![](early/generated_image12300.jpg)
+![](early/generated_image12400.jpg)
+![](early/generated_image12500.jpg)
+![](early/generated_image12600.jpg)
+![](early/generated_image12700.jpg)
+![](early/generated_image12800.jpg)
+![](early/generated_image12900.jpg)
+![](early/generated_image1300.jpg)
+![](early/generated_image13000.jpg)
+![](early/generated_image13100.jpg)
+![](early/generated_image13200.jpg)
+![](early/generated_image13300.jpg)
+![](early/generated_image13400.jpg)
+![](early/generated_image13500.jpg)
+![](early/generated_image13600.jpg)
+![](early/generated_image13700.jpg)
+![](early/generated_image13800.jpg)
+![](early/generated_image13900.jpg)
+![](early/generated_image1400.jpg)
+![](early/generated_image14000.jpg)
+![](early/generated_image14100.jpg)
+![](early/generated_image14200.jpg)
+![](early/generated_image14300.jpg)
+![](early/generated_image14400.jpg)
+![](early/generated_image14500.jpg)
+![](early/generated_image14600.jpg)
+![](early/generated_image14700.jpg)
+![](early/generated_image14800.jpg)
+![](early/generated_image14900.jpg)
+![](early/generated_image1500.jpg)
+![](early/generated_image15000.jpg)
+![](early/generated_image15100.jpg)
+![](early/generated_image15200.jpg)
+![](early/generated_image15300.jpg)
+![](early/generated_image15400.jpg)
+![](early/generated_image15500.jpg)
+![](early/generated_image15600.jpg)
+![](early/generated_image15700.jpg)
+![](early/generated_image15800.jpg)
+![](early/generated_image15900.jpg)
+![](early/generated_image1600.jpg)
+![](early/generated_image16000.jpg)
+![](early/generated_image16100.jpg)
+![](early/generated_image16200.jpg)
+![](early/generated_image16300.jpg)
+![](early/generated_image16400.jpg)
+![](early/generated_image16500.jpg)
+![](early/generated_image16600.jpg)
+![](early/generated_image16700.jpg)
+![](early/generated_image16800.jpg)
+![](early/generated_image16900.jpg)
+![](early/generated_image1700.jpg)
+![](early/generated_image17000.jpg)
+![](early/generated_image17100.jpg)
+![](early/generated_image17200.jpg)
+![](early/generated_image17300.jpg)
+![](early/generated_image17400.jpg)
+![](early/generated_image17500.jpg)
+![](early/generated_image17600.jpg)
+![](early/generated_image17700.jpg)
+![](early/generated_image17800.jpg)
+![](early/generated_image17900.jpg)
+![](early/generated_image1800.jpg)
+![](early/generated_image18000.jpg)
+![](early/generated_image18100.jpg)
+![](early/generated_image18200.jpg)
+![](early/generated_image18300.jpg)
+![](early/generated_image18400.jpg)
+![](early/generated_image18500.jpg)
+![](early/generated_image18600.jpg)
+![](early/generated_image18700.jpg)
+![](early/generated_image18800.jpg)
+![](early/generated_image18900.jpg)
+![](early/generated_image1900.jpg)
+![](early/generated_image19000.jpg)
+![](early/generated_image19100.jpg)
+![](early/generated_image19200.jpg)
+![](early/generated_image19300.jpg)
+![](early/generated_image19400.jpg)
+![](early/generated_image19500.jpg)
+![](early/generated_image19600.jpg)
+![](early/generated_image19700.jpg)
+![](early/generated_image19800.jpg)
+![](early/generated_image19900.jpg)
+![](early/generated_image200.jpg)
+![](early/generated_image2000.jpg)
+![](early/generated_image20000.jpg)
+![](early/generated_image20100.jpg)
+![](early/generated_image20200.jpg)
+![](early/generated_image20300.jpg)
+![](early/generated_image20400.jpg)
+![](early/generated_image20500.jpg)
+![](early/generated_image20600.jpg)
+![](early/generated_image20700.jpg)
+![](early/generated_image20800.jpg)
+![](early/generated_image20900.jpg)
+![](early/generated_image2100.jpg)
+![](early/generated_image21000.jpg)
+![](early/generated_image21100.jpg)
+![](early/generated_image21200.jpg)
+![](early/generated_image21300.jpg)
+![](early/generated_image21400.jpg)
+![](early/generated_image21500.jpg)
+![](early/generated_image21600.jpg)
+![](early/generated_image21700.jpg)
+![](early/generated_image21800.jpg)
+![](early/generated_image21900.jpg)
+![](early/generated_image2200.jpg)
+![](early/generated_image22000.jpg)
+![](early/generated_image22100.jpg)
+![](early/generated_image22200.jpg)
+![](early/generated_image22300.jpg)
+![](early/generated_image22400.jpg)
+![](early/generated_image22500.jpg)
+![](early/generated_image22600.jpg)
+![](early/generated_image22700.jpg)
+![](early/generated_image22800.jpg)
+![](early/generated_image22900.jpg)
+![](early/generated_image2300.jpg)
+![](early/generated_image23000.jpg)
+![](early/generated_image23100.jpg)
+![](early/generated_image23200.jpg)
+![](early/generated_image23300.jpg)
+![](early/generated_image23400.jpg)
+![](early/generated_image23500.jpg)
+![](early/generated_image23600.jpg)
+![](early/generated_image23700.jpg)
+![](early/generated_image23800.jpg)
+![](early/generated_image23900.jpg)
+![](early/generated_image2400.jpg)
+![](early/generated_image24000.jpg)
+![](early/generated_image24100.jpg)
+![](early/generated_image24200.jpg)
+![](early/generated_image24300.jpg)
+![](early/generated_image24400.jpg)
+![](early/generated_image24500.jpg)
+![](early/generated_image24600.jpg)
+![](early/generated_image24700.jpg)
+![](early/generated_image24800.jpg)
+![](early/generated_image24900.jpg)
+![](early/generated_image2500.jpg)
+![](early/generated_image25000.jpg)
+![](early/generated_image25100.jpg)
+![](early/generated_image25200.jpg)
+![](early/generated_image25300.jpg)
+![](early/generated_image25400.jpg)
+![](early/generated_image25500.jpg)
+![](early/generated_image25600.jpg)
+![](early/generated_image25700.jpg)
+![](early/generated_image25800.jpg)
+![](early/generated_image25900.jpg)
+![](early/generated_image2600.jpg)
+![](early/generated_image26000.jpg)
+![](early/generated_image26100.jpg)
+![](early/generated_image26200.jpg)
+![](early/generated_image26300.jpg)
+![](early/generated_image26400.jpg)
+![](early/generated_image26500.jpg)
+![](early/generated_image26600.jpg)
+![](early/generated_image26700.jpg)
+![](early/generated_image26800.jpg)
+![](early/generated_image26900.jpg)
+![](early/generated_image2700.jpg)
+![](early/generated_image27000.jpg)
+![](early/generated_image27100.jpg)
+![](early/generated_image27200.jpg)
+![](early/generated_image27300.jpg)
+![](early/generated_image27400.jpg)
+![](early/generated_image27500.jpg)
+![](early/generated_image27600.jpg)
+![](early/generated_image27700.jpg)
+![](early/generated_image27800.jpg)
+![](early/generated_image27900.jpg)
+![](early/generated_image2800.jpg)
+![](early/generated_image28000.jpg)
+![](early/generated_image28100.jpg)
+![](early/generated_image28200.jpg)
+![](early/generated_image28300.jpg)
+![](early/generated_image28400.jpg)
+![](early/generated_image28500.jpg)
+![](early/generated_image28600.jpg)
+![](early/generated_image28700.jpg)
+![](early/generated_image28800.jpg)
+![](early/generated_image28900.jpg)
+![](early/generated_image2900.jpg)
+![](early/generated_image29000.jpg)
+![](early/generated_image29100.jpg)
+![](early/generated_image29200.jpg)
+![](early/generated_image29300.jpg)
+![](early/generated_image29400.jpg)
+![](early/generated_image29500.jpg)
+![](early/generated_image29600.jpg)
+![](early/generated_image29700.jpg)
+![](early/generated_image29800.jpg)
+![](early/generated_image29900.jpg)
+![](early/generated_image300.jpg)
+![](early/generated_image3000.jpg)
+![](early/generated_image30000.jpg)
+![](early/generated_image30100.jpg)
+![](early/generated_image30200.jpg)
+![](early/generated_image30300.jpg)
+![](early/generated_image30400.jpg)
+![](early/generated_image30500.jpg)
+![](early/generated_image30600.jpg)
+![](early/generated_image30700.jpg)
+![](early/generated_image30800.jpg)
+![](early/generated_image30900.jpg)
+![](early/generated_image3100.jpg)
+![](early/generated_image31000.jpg)
+![](early/generated_image31100.jpg)
+![](early/generated_image31200.jpg)
+![](early/generated_image31300.jpg)
+![](early/generated_image31400.jpg)
+![](early/generated_image31500.jpg)
+![](early/generated_image31600.jpg)
+![](early/generated_image31700.jpg)
+![](early/generated_image31800.jpg)
+![](early/generated_image31900.jpg)
+![](early/generated_image3200.jpg)
+![](early/generated_image32000.jpg)
+![](early/generated_image32100.jpg)
+![](early/generated_image32200.jpg)
+![](early/generated_image32300.jpg)
+![](early/generated_image32400.jpg)
+![](early/generated_image32500.jpg)
+![](early/generated_image32600.jpg)
+![](early/generated_image32700.jpg)
+![](early/generated_image32800.jpg)
+![](early/generated_image32900.jpg)
+![](early/generated_image3300.jpg)
+![](early/generated_image33000.jpg)
+![](early/generated_image33100.jpg)
+![](early/generated_image33200.jpg)
+![](early/generated_image33300.jpg)
+![](early/generated_image33400.jpg)
+![](early/generated_image33500.jpg)
+![](early/generated_image33600.jpg)
+![](early/generated_image33700.jpg)
+![](early/generated_image33800.jpg)
+![](early/generated_image33900.jpg)
+![](early/generated_image3400.jpg)
+![](early/generated_image34000.jpg)
+![](early/generated_image34100.jpg)
+![](early/generated_image34200.jpg)
+![](early/generated_image34300.jpg)
+![](early/generated_image34400.jpg)
+![](early/generated_image34500.jpg)
+![](early/generated_image34600.jpg)
+![](early/generated_image34700.jpg)
+![](early/generated_image34800.jpg)
+![](early/generated_image34900.jpg)
+![](early/generated_image3500.jpg)
+![](early/generated_image35000.jpg)
+![](early/generated_image35100.jpg)
+![](early/generated_image35200.jpg)
+![](early/generated_image35300.jpg)
+![](early/generated_image35400.jpg)
+![](early/generated_image35500.jpg)
+![](early/generated_image35600.jpg)
+![](early/generated_image35700.jpg)
+![](early/generated_image35800.jpg)
+![](early/generated_image35900.jpg)
+![](early/generated_image3600.jpg)
+![](early/generated_image36000.jpg)
+![](early/generated_image36100.jpg)
+![](early/generated_image36200.jpg)
+![](early/generated_image36300.jpg)
+![](early/generated_image36400.jpg)
+![](early/generated_image36500.jpg)
+![](early/generated_image36600.jpg)
+![](early/generated_image36700.jpg)
+![](early/generated_image36800.jpg)
+![](early/generated_image36900.jpg)
+![](early/generated_image3700.jpg)
+![](early/generated_image37000.jpg)
+![](early/generated_image37100.jpg)
+![](early/generated_image37200.jpg)
+![](early/generated_image37300.jpg)
+![](early/generated_image37400.jpg)
+![](early/generated_image37500.jpg)
+![](early/generated_image37600.jpg)
+![](early/generated_image37700.jpg)
+![](early/generated_image37800.jpg)
+![](early/generated_image37900.jpg)
+![](early/generated_image3800.jpg)
+![](early/generated_image38000.jpg)
+![](early/generated_image38100.jpg)
+![](early/generated_image38200.jpg)
+![](early/generated_image38300.jpg)
+![](early/generated_image38400.jpg)
+![](early/generated_image38500.jpg)
+![](early/generated_image38600.jpg)
+![](early/generated_image38700.jpg)
+![](early/generated_image38800.jpg)
+![](early/generated_image38900.jpg)
+![](early/generated_image3900.jpg)
+![](early/generated_image39000.jpg)
+![](early/generated_image39100.jpg)
+![](early/generated_image39200.jpg)
+![](early/generated_image39300.jpg)
+![](early/generated_image39400.jpg)
+![](early/generated_image39500.jpg)
+![](early/generated_image39600.jpg)
+![](early/generated_image39700.jpg)
+![](early/generated_image39800.jpg)
+![](early/generated_image39900.jpg)
+![](early/generated_image400.jpg)
+![](early/generated_image4000.jpg)
+![](early/generated_image40000.jpg)
+![](early/generated_image40100.jpg)
+![](early/generated_image40200.jpg)
+![](early/generated_image40300.jpg)
+![](early/generated_image40400.jpg)
+![](early/generated_image40500.jpg)
+![](early/generated_image40600.jpg)
+![](early/generated_image40700.jpg)
+![](early/generated_image40800.jpg)
+![](early/generated_image40900.jpg)
+![](early/generated_image4100.jpg)
+![](early/generated_image41000.jpg)
+![](early/generated_image41100.jpg)
+![](early/generated_image41200.jpg)
+![](early/generated_image41300.jpg)
+![](early/generated_image41400.jpg)
+![](early/generated_image41500.jpg)
+![](early/generated_image41600.jpg)
+![](early/generated_image41700.jpg)
+![](early/generated_image41800.jpg)
+![](early/generated_image41900.jpg)
+![](early/generated_image4200.jpg)
+![](early/generated_image42000.jpg)
+![](early/generated_image42100.jpg)
+![](early/generated_image42200.jpg)
+![](early/generated_image42300.jpg)
+![](early/generated_image42400.jpg)
+![](early/generated_image42500.jpg)
+![](early/generated_image42600.jpg)
+![](early/generated_image42700.jpg)
+![](early/generated_image42800.jpg)
+![](early/generated_image42900.jpg)
+![](early/generated_image4300.jpg)
+![](early/generated_image43000.jpg)
+![](early/generated_image43100.jpg)
+![](early/generated_image43200.jpg)
+![](early/generated_image43300.jpg)
+![](early/generated_image43400.jpg)
+![](early/generated_image43500.jpg)
+![](early/generated_image43600.jpg)
+![](early/generated_image43700.jpg)
+![](early/generated_image43800.jpg)
+![](early/generated_image43900.jpg)
+![](early/generated_image4400.jpg)
+![](early/generated_image44000.jpg)
+![](early/generated_image44100.jpg)
+![](early/generated_image44200.jpg)
+![](early/generated_image44300.jpg)
+![](early/generated_image44400.jpg)
+![](early/generated_image44500.jpg)
+![](early/generated_image44600.jpg)
+![](early/generated_image44700.jpg)
+![](early/generated_image44800.jpg)
+![](early/generated_image44900.jpg)
+![](early/generated_image4500.jpg)
+![](early/generated_image45000.jpg)
+![](early/generated_image45100.jpg)
+![](early/generated_image45200.jpg)
+![](early/generated_image45300.jpg)
+![](early/generated_image45400.jpg)
+![](early/generated_image45500.jpg)
+![](early/generated_image45600.jpg)
+![](early/generated_image45700.jpg)
+![](early/generated_image45800.jpg)
+![](early/generated_image45900.jpg)
+![](early/generated_image4600.jpg)
+![](early/generated_image46000.jpg)
+![](early/generated_image46100.jpg)
+![](early/generated_image46200.jpg)
+![](early/generated_image46300.jpg)
+![](early/generated_image46400.jpg)
+![](early/generated_image46500.jpg)
+![](early/generated_image46600.jpg)
+![](early/generated_image46700.jpg)
+![](early/generated_image46800.jpg)
+![](early/generated_image46900.jpg)
+![](early/generated_image4700.jpg)
+![](early/generated_image47000.jpg)
+![](early/generated_image47100.jpg)
+![](early/generated_image47200.jpg)
+![](early/generated_image47300.jpg)
+![](early/generated_image47400.jpg)
+![](early/generated_image47500.jpg)
+![](early/generated_image47600.jpg)
+![](early/generated_image47700.jpg)
+![](early/generated_image47800.jpg)
+![](early/generated_image47900.jpg)
+![](early/generated_image4800.jpg)
+![](early/generated_image48000.jpg)
+![](early/generated_image48100.jpg)
+![](early/generated_image48200.jpg)
+![](early/generated_image48300.jpg)
+![](early/generated_image48400.jpg)
+![](early/generated_image48500.jpg)
+![](early/generated_image48600.jpg)
+![](early/generated_image48700.jpg)
+![](early/generated_image48800.jpg)
+![](early/generated_image48900.jpg)
+![](early/generated_image4900.jpg)
+![](early/generated_image49000.jpg)
+![](early/generated_image49100.jpg)
+![](early/generated_image49200.jpg)
+![](early/generated_image49300.jpg)
+![](early/generated_image49400.jpg)
+![](early/generated_image49500.jpg)
+![](early/generated_image49600.jpg)
+![](early/generated_image49700.jpg)
+![](early/generated_image49800.jpg)
+![](early/generated_image49900.jpg)
+![](early/generated_image500.jpg)
+![](early/generated_image5000.jpg)
+![](early/generated_image50000.jpg)
+![](early/generated_image50100.jpg)
+![](early/generated_image50200.jpg)
+![](early/generated_image50300.jpg)
+![](early/generated_image50400.jpg)
+![](early/generated_image50500.jpg)
+![](early/generated_image50600.jpg)
+![](early/generated_image50700.jpg)
+![](early/generated_image50800.jpg)
+![](early/generated_image50900.jpg)
+![](early/generated_image5100.jpg)
+![](early/generated_image51000.jpg)
+![](early/generated_image51100.jpg)
+![](early/generated_image51200.jpg)
+![](early/generated_image51300.jpg)
+![](early/generated_image51400.jpg)
+![](early/generated_image51500.jpg)
+![](early/generated_image51600.jpg)
+![](early/generated_image51700.jpg)
+![](early/generated_image51800.jpg)
+![](early/generated_image51900.jpg)
+![](early/generated_image5200.jpg)
+![](early/generated_image52000.jpg)
+![](early/generated_image52100.jpg)
+![](early/generated_image52200.jpg)
+![](early/generated_image52300.jpg)
+![](early/generated_image52400.jpg)
+![](early/generated_image52500.jpg)
+![](early/generated_image52600.jpg)
+![](early/generated_image52700.jpg)
+![](early/generated_image52800.jpg)
+![](early/generated_image52900.jpg)
+![](early/generated_image5300.jpg)
+![](early/generated_image53000.jpg)
+![](early/generated_image53100.jpg)
+![](early/generated_image53200.jpg)
+![](early/generated_image53300.jpg)
+![](early/generated_image53400.jpg)
+![](early/generated_image53500.jpg)
+![](early/generated_image53600.jpg)
+![](early/generated_image53700.jpg)
+![](early/generated_image53800.jpg)
+![](early/generated_image53900.jpg)
+![](early/generated_image5400.jpg)
+![](early/generated_image54000.jpg)
+![](early/generated_image54100.jpg)
+![](early/generated_image54200.jpg)
+![](early/generated_image54300.jpg)
+![](early/generated_image54400.jpg)
+![](early/generated_image54500.jpg)
+![](early/generated_image54600.jpg)
+![](early/generated_image54700.jpg)
+![](early/generated_image54800.jpg)
+![](early/generated_image54900.jpg)
+![](early/generated_image5500.jpg)
+![](early/generated_image55000.jpg)
+![](early/generated_image55100.jpg)
+![](early/generated_image55200.jpg)
+![](early/generated_image55300.jpg)
+![](early/generated_image55400.jpg)
+![](early/generated_image55500.jpg)
+![](early/generated_image55600.jpg)
+![](early/generated_image55700.jpg)
+![](early/generated_image55800.jpg)
+![](early/generated_image55900.jpg)
+![](early/generated_image5600.jpg)
+![](early/generated_image56000.jpg)
+![](early/generated_image56100.jpg)
+![](early/generated_image56200.jpg)
+![](early/generated_image56300.jpg)
+![](early/generated_image56400.jpg)
+![](early/generated_image56500.jpg)
+![](early/generated_image56600.jpg)
+![](early/generated_image56700.jpg)
+![](early/generated_image56800.jpg)
+![](early/generated_image56900.jpg)
+![](early/generated_image5700.jpg)
+![](early/generated_image57000.jpg)
+![](early/generated_image57100.jpg)
+![](early/generated_image57200.jpg)
+![](early/generated_image57300.jpg)
+![](early/generated_image57400.jpg)
+![](early/generated_image57500.jpg)
+![](early/generated_image57600.jpg)
+![](early/generated_image57700.jpg)
+![](early/generated_image57800.jpg)
+![](early/generated_image57900.jpg)
+![](early/generated_image5800.jpg)
+![](early/generated_image58000.jpg)
+![](early/generated_image58100.jpg)
+![](early/generated_image58200.jpg)
+![](early/generated_image58300.jpg)
+![](early/generated_image58400.jpg)
+![](early/generated_image58500.jpg)
+![](early/generated_image58600.jpg)
+![](early/generated_image58700.jpg)
+![](early/generated_image58800.jpg)
+![](early/generated_image58900.jpg)
+![](early/generated_image5900.jpg)
+![](early/generated_image59000.jpg)
+![](early/generated_image59100.jpg)
+![](early/generated_image59200.jpg)
+![](early/generated_image59300.jpg)
+![](early/generated_image59400.jpg)
+![](early/generated_image59500.jpg)
+![](early/generated_image59600.jpg)
+![](early/generated_image59700.jpg)
+![](early/generated_image59800.jpg)
+![](early/generated_image59900.jpg)
+![](early/generated_image600.jpg)
+![](early/generated_image6000.jpg)
+![](early/generated_image60000.jpg)
+![](early/generated_image60100.jpg)
+![](early/generated_image60200.jpg)
+![](early/generated_image60300.jpg)
+![](early/generated_image60400.jpg)
+![](early/generated_image60500.jpg)
+![](early/generated_image60600.jpg)
+![](early/generated_image60700.jpg)
+![](early/generated_image60800.jpg)
+![](early/generated_image60900.jpg)
+![](early/generated_image6100.jpg)
+![](early/generated_image61000.jpg)
+![](early/generated_image61100.jpg)
+![](early/generated_image61200.jpg)
+![](early/generated_image61300.jpg)
+![](early/generated_image61400.jpg)
+![](early/generated_image61500.jpg)
+![](early/generated_image61600.jpg)
+![](early/generated_image61700.jpg)
+![](early/generated_image61800.jpg)
+![](early/generated_image61900.jpg)
+![](early/generated_image6200.jpg)
+![](early/generated_image62000.jpg)
+![](early/generated_image62100.jpg)
+![](early/generated_image62200.jpg)
+![](early/generated_image62300.jpg)
+![](early/generated_image62400.jpg)
+![](early/generated_image62500.jpg)
+![](early/generated_image62600.jpg)
+![](early/generated_image62700.jpg)
+![](early/generated_image62800.jpg)
+![](early/generated_image62900.jpg)
+![](early/generated_image6300.jpg)
+![](early/generated_image63000.jpg)
+![](early/generated_image63100.jpg)
+![](early/generated_image63200.jpg)
+![](early/generated_image63300.jpg)
+![](early/generated_image63400.jpg)
+![](early/generated_image63500.jpg)
+![](early/generated_image63600.jpg)
+![](early/generated_image63700.jpg)
+![](early/generated_image63800.jpg)
+![](early/generated_image63900.jpg)
+![](early/generated_image6400.jpg)
+![](early/generated_image64000.jpg)
+![](early/generated_image64100.jpg)
+![](early/generated_image64200.jpg)
+![](early/generated_image64300.jpg)
+![](early/generated_image64400.jpg)
+![](early/generated_image64500.jpg)
+![](early/generated_image64600.jpg)
+![](early/generated_image64700.jpg)
+![](early/generated_image64800.jpg)
+![](early/generated_image64900.jpg)
+![](early/generated_image6500.jpg)
+![](early/generated_image65000.jpg)
+![](early/generated_image65100.jpg)
+![](early/generated_image65200.jpg)
+![](early/generated_image65300.jpg)
+![](early/generated_image65400.jpg)
+![](early/generated_image65500.jpg)
+![](early/generated_image65600.jpg)
+![](early/generated_image65700.jpg)
+![](early/generated_image65800.jpg)
+![](early/generated_image65900.jpg)
+![](early/generated_image6600.jpg)
+![](early/generated_image66000.jpg)
+![](early/generated_image66100.jpg)
+![](early/generated_image66200.jpg)
+![](early/generated_image66300.jpg)
+![](early/generated_image66400.jpg)
+![](early/generated_image66500.jpg)
+![](early/generated_image66600.jpg)
+![](early/generated_image66700.jpg)
+![](early/generated_image66800.jpg)
+![](early/generated_image66900.jpg)
+![](early/generated_image6700.jpg)
+![](early/generated_image67000.jpg)
+![](early/generated_image67100.jpg)
+![](early/generated_image67200.jpg)
+![](early/generated_image67300.jpg)
+![](early/generated_image67400.jpg)
+![](early/generated_image67500.jpg)
+![](early/generated_image67600.jpg)
+![](early/generated_image67700.jpg)
+![](early/generated_image67800.jpg)
+![](early/generated_image67900.jpg)
+![](early/generated_image6800.jpg)
+![](early/generated_image68000.jpg)
+![](early/generated_image68100.jpg)
+![](early/generated_image68200.jpg)
+![](early/generated_image68300.jpg)
+![](early/generated_image68400.jpg)
+![](early/generated_image68500.jpg)
+![](early/generated_image68600.jpg)
+![](early/generated_image68700.jpg)
+![](early/generated_image68800.jpg)
+![](early/generated_image68900.jpg)
+![](early/generated_image6900.jpg)
+![](early/generated_image69000.jpg)
+![](early/generated_image69100.jpg)
+![](early/generated_image69200.jpg)
+![](early/generated_image69300.jpg)
+![](early/generated_image69400.jpg)
+![](early/generated_image69500.jpg)
+![](early/generated_image69600.jpg)
+![](early/generated_image69700.jpg)
+![](early/generated_image69800.jpg)
+![](early/generated_image69900.jpg)
+![](early/generated_image700.jpg)
+![](early/generated_image7000.jpg)
+![](early/generated_image70000.jpg)
+![](early/generated_image70100.jpg)
+![](early/generated_image70200.jpg)
+![](early/generated_image70300.jpg)
+![](early/generated_image70400.jpg)
+![](early/generated_image70500.jpg)
+![](early/generated_image70600.jpg)
+![](early/generated_image70700.jpg)
+![](early/generated_image70800.jpg)
+![](early/generated_image70900.jpg)
+![](early/generated_image7100.jpg)
+![](early/generated_image71000.jpg)
+![](early/generated_image71100.jpg)
+![](early/generated_image71200.jpg)
+![](early/generated_image71300.jpg)
+![](early/generated_image71400.jpg)
+![](early/generated_image71500.jpg)
+![](early/generated_image71600.jpg)
+![](early/generated_image71700.jpg)
+![](early/generated_image71800.jpg)
+![](early/generated_image71900.jpg)
+![](early/generated_image7200.jpg)
+![](early/generated_image72000.jpg)
+![](early/generated_image72100.jpg)
+![](early/generated_image72200.jpg)
+![](early/generated_image72300.jpg)
+![](early/generated_image72400.jpg)
+![](early/generated_image72500.jpg)
+![](early/generated_image72600.jpg)
+![](early/generated_image72700.jpg)
+![](early/generated_image72800.jpg)
+![](early/generated_image72900.jpg)
+![](early/generated_image7300.jpg)
+![](early/generated_image73000.jpg)
+![](early/generated_image73100.jpg)
+![](early/generated_image73200.jpg)
+![](early/generated_image73300.jpg)
+![](early/generated_image73400.jpg)
+![](early/generated_image73500.jpg)
+![](early/generated_image73600.jpg)
+![](early/generated_image73700.jpg)
+![](early/generated_image73800.jpg)
+![](early/generated_image73900.jpg)
+![](early/generated_image7400.jpg)
+![](early/generated_image74000.jpg)
+![](early/generated_image74100.jpg)
+![](early/generated_image74200.jpg)
+![](early/generated_image74300.jpg)
+![](early/generated_image74400.jpg)
+![](early/generated_image74500.jpg)
+![](early/generated_image74600.jpg)
+![](early/generated_image74700.jpg)
+![](early/generated_image74800.jpg)
+![](early/generated_image74900.jpg)
+![](early/generated_image7500.jpg)
+![](early/generated_image75000.jpg)
+![](early/generated_image7600.jpg)
+![](early/generated_image7700.jpg)
+![](early/generated_image7800.jpg)
+![](early/generated_image7900.jpg)
+![](early/generated_image800.jpg)
+![](early/generated_image8000.jpg)
+![](early/generated_image8100.jpg)
+![](early/generated_image8200.jpg)
+![](early/generated_image8300.jpg)
+![](early/generated_image8400.jpg)
+![](early/generated_image8500.jpg)
+![](early/generated_image8600.jpg)
+![](early/generated_image8700.jpg)
+![](early/generated_image8800.jpg)
+![](early/generated_image8900.jpg)
+![](early/generated_image900.jpg)
+![](early/generated_image9000.jpg)
+![](early/generated_image9100.jpg)
+![](early/generated_image9200.jpg)
+![](early/generated_image9300.jpg)
+![](early/generated_image9400.jpg)
+![](early/generated_image9500.jpg)
+![](early/generated_image9600.jpg)
+![](early/generated_image9700.jpg)
+![](early/generated_image9800.jpg)
+![](early/generated_image9900.jpg)
+![](early/generated_image75100.jpg)
+![](early/generated_image75200.jpg)
+![](early/generated_image75300.jpg)
+![](early/generated_image75400.jpg)
+
+### Later Stages
+
+```{r, eval = FALSE, echo = FALSE}
+later_images <- list.files("later/")
+
+for (i in later_images) {
+  file <- glue::glue("![](later/{i})\n")
+  print(file)
+}
+```
+
+![](later/generated_image100.png)
+![](later/generated_image1000.png)
+![](later/generated_image10000.png)
+![](later/generated_image10100.png)
+![](later/generated_image10200.png)
+![](later/generated_image10300.png)
+![](later/generated_image10400.png)
+![](later/generated_image10500.png)
+![](later/generated_image10600.png)
+![](later/generated_image10700.png)
+![](later/generated_image10800.png)
+![](later/generated_image10900.png)
+![](later/generated_image1100.png)
+![](later/generated_image11000.png)
+![](later/generated_image11100.png)
+![](later/generated_image11200.png)
+![](later/generated_image11300.png)
+![](later/generated_image11400.png)
+![](later/generated_image11500.png)
+![](later/generated_image11600.png)
+![](later/generated_image11700.png)
+![](later/generated_image11800.png)
+![](later/generated_image11900.png)
+![](later/generated_image1200.png)
+![](later/generated_image12000.png)
+![](later/generated_image12100.png)
+![](later/generated_image12200.png)
+![](later/generated_image12300.png)
+![](later/generated_image12400.png)
+![](later/generated_image12500.png)
+![](later/generated_image12600.png)
+![](later/generated_image12700.png)
+![](later/generated_image12800.png)
+![](later/generated_image12900.png)
+![](later/generated_image1300.png)
+![](later/generated_image13000.png)
+![](later/generated_image13100.png)
+![](later/generated_image13200.png)
+![](later/generated_image13300.png)
+![](later/generated_image13400.png)
+![](later/generated_image13500.png)
+![](later/generated_image13600.png)
+![](later/generated_image13700.png)
+![](later/generated_image13800.png)
+![](later/generated_image13900.png)
+![](later/generated_image1400.png)
+![](later/generated_image14000.png)
+![](later/generated_image14100.png)
+![](later/generated_image14200.png)
+![](later/generated_image14300.png)
+![](later/generated_image14400.png)
+![](later/generated_image14500.png)
+![](later/generated_image14600.png)
+![](later/generated_image14700.png)
+![](later/generated_image14800.png)
+![](later/generated_image14900.png)
+![](later/generated_image1500.png)
+![](later/generated_image15000.png)
+![](later/generated_image15100.png)
+![](later/generated_image15200.png)
+![](later/generated_image15300.png)
+![](later/generated_image15400.png)
+![](later/generated_image15500.png)
+![](later/generated_image15600.png)
+![](later/generated_image15700.png)
+![](later/generated_image15800.png)
+![](later/generated_image15900.png)
+![](later/generated_image1600.png)
+![](later/generated_image16000.png)
+![](later/generated_image16100.png)
+![](later/generated_image16200.png)
+![](later/generated_image16300.png)
+![](later/generated_image16400.png)
+![](later/generated_image16500.png)
+![](later/generated_image16600.png)
+![](later/generated_image16700.png)
+![](later/generated_image16800.png)
+![](later/generated_image16900.png)
+![](later/generated_image1700.png)
+![](later/generated_image17000.png)
+![](later/generated_image17100.png)
+![](later/generated_image17200.png)
+![](later/generated_image17300.png)
+![](later/generated_image17400.png)
+![](later/generated_image17500.png)
+![](later/generated_image17600.png)
+![](later/generated_image17700.png)
+![](later/generated_image17800.png)
+![](later/generated_image17900.png)
+![](later/generated_image1800.png)
+![](later/generated_image18000.png)
+![](later/generated_image18100.png)
+![](later/generated_image18200.png)
+![](later/generated_image18300.png)
+![](later/generated_image18400.png)
+![](later/generated_image18500.png)
+![](later/generated_image18600.png)
+![](later/generated_image18700.png)
+![](later/generated_image18800.png)
+![](later/generated_image18900.png)
+![](later/generated_image1900.png)
+![](later/generated_image19000.png)
+![](later/generated_image19100.png)
+![](later/generated_image19200.png)
+![](later/generated_image19300.png)
+![](later/generated_image19400.png)
+![](later/generated_image19500.png)
+![](later/generated_image19600.png)
+![](later/generated_image19700.png)
+![](later/generated_image19800.png)
+![](later/generated_image19900.png)
+![](later/generated_image200.png)
+![](later/generated_image2000.png)
+![](later/generated_image20000.png)
+![](later/generated_image20100.png)
+![](later/generated_image20200.png)
+![](later/generated_image20300.png)
+![](later/generated_image20400.png)
+![](later/generated_image20500.png)
+![](later/generated_image20600.png)
+![](later/generated_image20700.png)
+![](later/generated_image20800.png)
+![](later/generated_image20900.png)
+![](later/generated_image2100.png)
+![](later/generated_image21000.png)
+![](later/generated_image21100.png)
+![](later/generated_image21200.png)
+![](later/generated_image21300.png)
+![](later/generated_image21400.png)
+![](later/generated_image21500.png)
+![](later/generated_image21600.png)
+![](later/generated_image21700.png)
+![](later/generated_image21800.png)
+![](later/generated_image21900.png)
+![](later/generated_image2200.png)
+![](later/generated_image22000.png)
+![](later/generated_image22100.png)
+![](later/generated_image22200.png)
+![](later/generated_image22300.png)
+![](later/generated_image22400.png)
+![](later/generated_image22500.png)
+![](later/generated_image22600.png)
+![](later/generated_image22700.png)
+![](later/generated_image22800.png)
+![](later/generated_image22900.png)
+![](later/generated_image2300.png)
+![](later/generated_image23000.png)
+![](later/generated_image23100.png)
+![](later/generated_image23200.png)
+![](later/generated_image23300.png)
+![](later/generated_image23400.png)
+![](later/generated_image23500.png)
+![](later/generated_image23600.png)
+![](later/generated_image23700.png)
+![](later/generated_image23800.png)
+![](later/generated_image23900.png)
+![](later/generated_image2400.png)
+![](later/generated_image24000.png)
+![](later/generated_image24100.png)
+![](later/generated_image24200.png)
+![](later/generated_image24300.png)
+![](later/generated_image24400.png)
+![](later/generated_image24500.png)
+![](later/generated_image24600.png)
+![](later/generated_image24700.png)
+![](later/generated_image24800.png)
+![](later/generated_image24900.png)
+![](later/generated_image2500.png)
+![](later/generated_image25000.png)
+![](later/generated_image25100.png)
+![](later/generated_image25200.png)
+![](later/generated_image25300.png)
+![](later/generated_image25400.png)
+![](later/generated_image25500.png)
+![](later/generated_image25600.png)
+![](later/generated_image25700.png)
+![](later/generated_image25800.png)
+![](later/generated_image25900.png)
+![](later/generated_image2600.png)
+![](later/generated_image26000.png)
+![](later/generated_image26100.png)
+![](later/generated_image26200.png)
+![](later/generated_image26300.png)
+![](later/generated_image26400.png)
+![](later/generated_image26500.png)
+![](later/generated_image26600.png)
+![](later/generated_image26700.png)
+![](later/generated_image26800.png)
+![](later/generated_image26900.png)
+![](later/generated_image2700.png)
+![](later/generated_image27000.png)
+![](later/generated_image27100.png)
+![](later/generated_image27200.png)
+![](later/generated_image27300.png)
+![](later/generated_image27400.png)
+![](later/generated_image27500.png)
+![](later/generated_image27600.png)
+![](later/generated_image27700.png)
+![](later/generated_image27800.png)
+![](later/generated_image27900.png)
+![](later/generated_image2800.png)
+![](later/generated_image28000.png)
+![](later/generated_image28100.png)
+![](later/generated_image28200.png)
+![](later/generated_image28300.png)
+![](later/generated_image28400.png)
+![](later/generated_image28500.png)
+![](later/generated_image28600.png)
+![](later/generated_image28700.png)
+![](later/generated_image28800.png)
+![](later/generated_image28900.png)
+![](later/generated_image2900.png)
+![](later/generated_image29000.png)
+![](later/generated_image29100.png)
+![](later/generated_image29200.png)
+![](later/generated_image29300.png)
+![](later/generated_image29400.png)
+![](later/generated_image29500.png)
+![](later/generated_image29600.png)
+![](later/generated_image29700.png)
+![](later/generated_image29800.png)
+![](later/generated_image29900.png)
+![](later/generated_image300.png)
+![](later/generated_image3000.png)
+![](later/generated_image30000.png)
+![](later/generated_image30100.png)
+![](later/generated_image30200.png)
+![](later/generated_image30300.png)
+![](later/generated_image30400.png)
+![](later/generated_image30500.png)
+![](later/generated_image30600.png)
+![](later/generated_image30700.png)
+![](later/generated_image30800.png)
+![](later/generated_image30900.png)
+![](later/generated_image3100.png)
+![](later/generated_image31000.png)
+![](later/generated_image31100.png)
+![](later/generated_image31200.png)
+![](later/generated_image31300.png)
+![](later/generated_image31400.png)
+![](later/generated_image31500.png)
+![](later/generated_image31600.png)
+![](later/generated_image31700.png)
+![](later/generated_image31800.png)
+![](later/generated_image31900.png)
+![](later/generated_image3200.png)
+![](later/generated_image32000.png)
+![](later/generated_image32100.png)
+![](later/generated_image32200.png)
+![](later/generated_image32300.png)
+![](later/generated_image32400.png)
+![](later/generated_image32500.png)
+![](later/generated_image32600.png)
+![](later/generated_image32700.png)
+![](later/generated_image32800.png)
+![](later/generated_image32900.png)
+![](later/generated_image3300.png)
+![](later/generated_image33000.png)
+![](later/generated_image33100.png)
+![](later/generated_image33200.png)
+![](later/generated_image33300.png)
+![](later/generated_image33400.png)
+![](later/generated_image33500.png)
+![](later/generated_image33600.png)
+![](later/generated_image33700.png)
+![](later/generated_image33800.png)
+![](later/generated_image33900.png)
+![](later/generated_image3400.png)
+![](later/generated_image34000.png)
+![](later/generated_image34100.png)
+![](later/generated_image34200.png)
+![](later/generated_image34300.png)
+![](later/generated_image34400.png)
+![](later/generated_image34500.png)
+![](later/generated_image34600.png)
+![](later/generated_image34700.png)
+![](later/generated_image34800.png)
+![](later/generated_image34900.png)
+![](later/generated_image3500.png)
+![](later/generated_image35000.png)
+![](later/generated_image35100.png)
+![](later/generated_image35200.png)
+![](later/generated_image35300.png)
+![](later/generated_image35400.png)
+![](later/generated_image35500.png)
+![](later/generated_image35600.png)
+![](later/generated_image35700.png)
+![](later/generated_image35800.png)
+![](later/generated_image35900.png)
+![](later/generated_image3600.png)
+![](later/generated_image36000.png)
+![](later/generated_image36100.png)
+![](later/generated_image36200.png)
+![](later/generated_image36300.png)
+![](later/generated_image36400.png)
+![](later/generated_image36500.png)
+![](later/generated_image36600.png)
+![](later/generated_image36700.png)
+![](later/generated_image36800.png)
+![](later/generated_image36900.png)
+![](later/generated_image3700.png)
+![](later/generated_image37000.png)
+![](later/generated_image37100.png)
+![](later/generated_image37200.png)
+![](later/generated_image37300.png)
+![](later/generated_image37400.png)
+![](later/generated_image37500.png)
+![](later/generated_image37600.png)
+![](later/generated_image37700.png)
+![](later/generated_image37800.png)
+![](later/generated_image37900.png)
+![](later/generated_image3800.png)
+![](later/generated_image38000.png)
+![](later/generated_image38100.png)
+![](later/generated_image38200.png)
+![](later/generated_image38300.png)
+![](later/generated_image38400.png)
+![](later/generated_image38500.png)
+![](later/generated_image38600.png)
+![](later/generated_image38700.png)
+![](later/generated_image38800.png)
+![](later/generated_image38900.png)
+![](later/generated_image3900.png)
+![](later/generated_image39000.png)
+![](later/generated_image39100.png)
+![](later/generated_image39200.png)
+![](later/generated_image39300.png)
+![](later/generated_image39400.png)
+![](later/generated_image39500.png)
+![](later/generated_image39600.png)
+![](later/generated_image39700.png)
+![](later/generated_image39800.png)
+![](later/generated_image39900.png)
+![](later/generated_image400.png)
+![](later/generated_image4000.png)
+![](later/generated_image40000.png)
+![](later/generated_image40100.png)
+![](later/generated_image40200.png)
+![](later/generated_image40300.png)
+![](later/generated_image40400.png)
+![](later/generated_image40500.png)
+![](later/generated_image40600.png)
+![](later/generated_image40700.png)
+![](later/generated_image40800.png)
+![](later/generated_image40900.png)
+![](later/generated_image4100.png)
+![](later/generated_image41000.png)
+![](later/generated_image41100.png)
+![](later/generated_image41200.png)
+![](later/generated_image41300.png)
+![](later/generated_image41400.png)
+![](later/generated_image41500.png)
+![](later/generated_image41600.png)
+![](later/generated_image41700.png)
+![](later/generated_image41800.png)
+![](later/generated_image41900.png)
+![](later/generated_image4200.png)
+![](later/generated_image42000.png)
+![](later/generated_image42100.png)
+![](later/generated_image42200.png)
+![](later/generated_image42300.png)
+![](later/generated_image42400.png)
+![](later/generated_image42500.png)
+![](later/generated_image42600.png)
+![](later/generated_image42700.png)
+![](later/generated_image42800.png)
+![](later/generated_image42900.png)
+![](later/generated_image4300.png)
+![](later/generated_image43000.png)
+![](later/generated_image43100.png)
+![](later/generated_image43200.png)
+![](later/generated_image43300.png)
+![](later/generated_image43400.png)
+![](later/generated_image43500.png)
+![](later/generated_image43600.png)
+![](later/generated_image43700.png)
+![](later/generated_image43800.png)
+![](later/generated_image43900.png)
+![](later/generated_image4400.png)
+![](later/generated_image44000.png)
+![](later/generated_image44100.png)
+![](later/generated_image44200.png)
+![](later/generated_image44300.png)
+![](later/generated_image44400.png)
+![](later/generated_image44500.png)
+![](later/generated_image44600.png)
+![](later/generated_image44700.png)
+![](later/generated_image44800.png)
+![](later/generated_image44900.png)
+![](later/generated_image4500.png)
+![](later/generated_image45000.png)
+![](later/generated_image45100.png)
+![](later/generated_image45200.png)
+![](later/generated_image45300.png)
+![](later/generated_image45400.png)
+![](later/generated_image45500.png)
+![](later/generated_image45600.png)
+![](later/generated_image45700.png)
+![](later/generated_image45800.png)
+![](later/generated_image45900.png)
+![](later/generated_image4600.png)
+![](later/generated_image46000.png)
+![](later/generated_image46100.png)
+![](later/generated_image46200.png)
+![](later/generated_image46300.png)
+![](later/generated_image46400.png)
+![](later/generated_image46500.png)
+![](later/generated_image46600.png)
+![](later/generated_image46700.png)
+![](later/generated_image46800.png)
+![](later/generated_image46900.png)
+![](later/generated_image4700.png)
+![](later/generated_image47000.png)
+![](later/generated_image47100.png)
+![](later/generated_image47200.png)
+![](later/generated_image47300.png)
+![](later/generated_image47400.png)
+![](later/generated_image47500.png)
+![](later/generated_image47600.png)
+![](later/generated_image47700.png)
+![](later/generated_image47800.png)
+![](later/generated_image47900.png)
+![](later/generated_image4800.png)
+![](later/generated_image48000.png)
+![](later/generated_image48100.png)
+![](later/generated_image48200.png)
+![](later/generated_image48300.png)
+![](later/generated_image48400.png)
+![](later/generated_image48500.png)
+![](later/generated_image48600.png)
+![](later/generated_image48700.png)
+![](later/generated_image48800.png)
+![](later/generated_image48900.png)
+![](later/generated_image4900.png)
+![](later/generated_image49000.png)
+![](later/generated_image49100.png)
+![](later/generated_image49200.png)
+![](later/generated_image49300.png)
+![](later/generated_image49400.png)
+![](later/generated_image49500.png)
+![](later/generated_image49600.png)
+![](later/generated_image49700.png)
+![](later/generated_image49800.png)
+![](later/generated_image49900.png)
+![](later/generated_image500.png)
+![](later/generated_image5000.png)
+![](later/generated_image50000.png)
+![](later/generated_image50100.png)
+![](later/generated_image50200.png)
+![](later/generated_image50300.png)
+![](later/generated_image50400.png)
+![](later/generated_image50500.png)
+![](later/generated_image50600.png)
+![](later/generated_image50700.png)
+![](later/generated_image50800.png)
+![](later/generated_image50900.png)
+![](later/generated_image5100.png)
+![](later/generated_image51000.png)
+![](later/generated_image51100.png)
+![](later/generated_image51200.png)
+![](later/generated_image51300.png)
+![](later/generated_image51400.png)
+![](later/generated_image51500.png)
+![](later/generated_image51600.png)
+![](later/generated_image51700.png)
+![](later/generated_image51800.png)
+![](later/generated_image51900.png)
+![](later/generated_image5200.png)
+![](later/generated_image52000.png)
+![](later/generated_image52100.png)
+![](later/generated_image52200.png)
+![](later/generated_image52300.png)
+![](later/generated_image52400.png)
+![](later/generated_image52500.png)
+![](later/generated_image52600.png)
+![](later/generated_image52700.png)
+![](later/generated_image52800.png)
+![](later/generated_image52900.png)
+![](later/generated_image5300.png)
+![](later/generated_image53000.png)
+![](later/generated_image53100.png)
+![](later/generated_image53200.png)
+![](later/generated_image53300.png)
+![](later/generated_image53400.png)
+![](later/generated_image53500.png)
+![](later/generated_image53600.png)
+![](later/generated_image53700.png)
+![](later/generated_image53800.png)
+![](later/generated_image53900.png)
+![](later/generated_image5400.png)
+![](later/generated_image54000.png)
+![](later/generated_image54100.png)
+![](later/generated_image54200.png)
+![](later/generated_image54300.png)
+![](later/generated_image54400.png)
+![](later/generated_image54500.png)
+![](later/generated_image54600.png)
+![](later/generated_image54700.png)
+![](later/generated_image54800.png)
+![](later/generated_image54900.png)
+![](later/generated_image5500.png)
+![](later/generated_image55000.png)
+![](later/generated_image55100.png)
+![](later/generated_image55200.png)
+![](later/generated_image55300.png)
+![](later/generated_image55400.png)
+![](later/generated_image55500.png)
+![](later/generated_image55600.png)
+![](later/generated_image55700.png)
+![](later/generated_image55800.png)
+![](later/generated_image55900.png)
+![](later/generated_image5600.png)
+![](later/generated_image56000.png)
+![](later/generated_image56100.png)
+![](later/generated_image56200.png)
+![](later/generated_image56300.png)
+![](later/generated_image56400.png)
+![](later/generated_image56500.png)
+![](later/generated_image56600.png)
+![](later/generated_image56700.png)
+![](later/generated_image56800.png)
+![](later/generated_image56900.png)
+![](later/generated_image5700.png)
+![](later/generated_image57000.png)
+![](later/generated_image57100.png)
+![](later/generated_image57200.png)
+![](later/generated_image57300.png)
+![](later/generated_image57400.png)
+![](later/generated_image57500.png)
+![](later/generated_image57600.png)
+![](later/generated_image57700.png)
+![](later/generated_image57800.png)
+![](later/generated_image57900.png)
+![](later/generated_image5800.png)
+![](later/generated_image58000.png)
+![](later/generated_image58100.png)
+![](later/generated_image58200.png)
+![](later/generated_image58300.png)
+![](later/generated_image58400.png)
+![](later/generated_image58500.png)
+![](later/generated_image58600.png)
+![](later/generated_image58700.png)
+![](later/generated_image58800.png)
+![](later/generated_image58900.png)
+![](later/generated_image5900.png)
+![](later/generated_image59000.png)
+![](later/generated_image59100.png)
+![](later/generated_image59200.png)
+![](later/generated_image59300.png)
+![](later/generated_image59400.png)
+![](later/generated_image59500.png)
+![](later/generated_image59600.png)
+![](later/generated_image59700.png)
+![](later/generated_image59800.png)
+![](later/generated_image59900.png)
+![](later/generated_image600.png)
+![](later/generated_image6000.png)
+![](later/generated_image60000.png)
+![](later/generated_image60100.png)
+![](later/generated_image60200.png)
+![](later/generated_image60300.png)
+![](later/generated_image60400.png)
+![](later/generated_image60500.png)
+![](later/generated_image60600.png)
+![](later/generated_image60700.png)
+![](later/generated_image60800.png)
+![](later/generated_image60900.png)
+![](later/generated_image6100.png)
+![](later/generated_image61000.png)
+![](later/generated_image61100.png)
+![](later/generated_image61200.png)
+![](later/generated_image61300.png)
+![](later/generated_image61400.png)
+![](later/generated_image61500.png)
+![](later/generated_image61600.png)
+![](later/generated_image61700.png)
+![](later/generated_image61800.png)
+![](later/generated_image61900.png)
+![](later/generated_image6200.png)
+![](later/generated_image62000.png)
+![](later/generated_image62100.png)
+![](later/generated_image62200.png)
+![](later/generated_image62300.png)
+![](later/generated_image62400.png)
+![](later/generated_image62500.png)
+![](later/generated_image62600.png)
+![](later/generated_image62700.png)
+![](later/generated_image62800.png)
+![](later/generated_image62900.png)
+![](later/generated_image6300.png)
+![](later/generated_image63000.png)
+![](later/generated_image63100.png)
+![](later/generated_image63200.png)
+![](later/generated_image63300.png)
+![](later/generated_image63400.png)
+![](later/generated_image63500.png)
+![](later/generated_image63600.png)
+![](later/generated_image63700.png)
+![](later/generated_image63800.png)
+![](later/generated_image63900.png)
+![](later/generated_image6400.png)
+![](later/generated_image64000.png)
+![](later/generated_image64100.png)
+![](later/generated_image64200.png)
+![](later/generated_image64300.png)
+![](later/generated_image64400.png)
+![](later/generated_image64500.png)
+![](later/generated_image64600.png)
+![](later/generated_image64700.png)
+![](later/generated_image64800.png)
+![](later/generated_image64900.png)
+![](later/generated_image6500.png)
+![](later/generated_image65000.png)
+![](later/generated_image65100.png)
+![](later/generated_image65200.png)
+![](later/generated_image65300.png)
+![](later/generated_image65400.png)
+![](later/generated_image65500.png)
+![](later/generated_image65600.png)
+![](later/generated_image65700.png)
+![](later/generated_image65800.png)
+![](later/generated_image65900.png)
+![](later/generated_image6600.png)
+![](later/generated_image66000.png)
+![](later/generated_image66100.png)
+![](later/generated_image66200.png)
+![](later/generated_image66300.png)
+![](later/generated_image66400.png)
+![](later/generated_image66500.png)
+![](later/generated_image66600.png)
+![](later/generated_image66700.png)
+![](later/generated_image66800.png)
+![](later/generated_image66900.png)
+![](later/generated_image6700.png)
+![](later/generated_image67000.png)
+![](later/generated_image67100.png)
+![](later/generated_image67200.png)
+![](later/generated_image67300.png)
+![](later/generated_image67400.png)
+![](later/generated_image67500.png)
+![](later/generated_image67600.png)
+![](later/generated_image67700.png)
+![](later/generated_image67800.png)
+![](later/generated_image67900.png)
+![](later/generated_image6800.png)
+![](later/generated_image68000.png)
+![](later/generated_image68100.png)
+![](later/generated_image68200.png)
+![](later/generated_image68300.png)
+![](later/generated_image68400.png)
+![](later/generated_image68500.png)
+![](later/generated_image68600.png)
+![](later/generated_image68700.png)
+![](later/generated_image68800.png)
+![](later/generated_image68900.png)
+![](later/generated_image6900.png)
+![](later/generated_image69000.png)
+![](later/generated_image69100.png)
+![](later/generated_image69200.png)
+![](later/generated_image69300.png)
+![](later/generated_image69400.png)
+![](later/generated_image69500.png)
+![](later/generated_image69600.png)
+![](later/generated_image69700.png)
+![](later/generated_image69800.png)
+![](later/generated_image69900.png)
+![](later/generated_image700.png)
+![](later/generated_image7000.png)
+![](later/generated_image70000.png)
+![](later/generated_image70100.png)
+![](later/generated_image70200.png)
+![](later/generated_image7100.png)
+![](later/generated_image7200.png)
+![](later/generated_image7300.png)
+![](later/generated_image7400.png)
+![](later/generated_image7500.png)
+![](later/generated_image7600.png)
+![](later/generated_image7700.png)
+![](later/generated_image7800.png)
+![](later/generated_image7900.png)
+![](later/generated_image800.png)
+![](later/generated_image8000.png)
+![](later/generated_image8100.png)
+![](later/generated_image8200.png)
+![](later/generated_image8300.png)
+![](later/generated_image8400.png)
+![](later/generated_image8500.png)
+![](later/generated_image8600.png)
+![](later/generated_image8700.png)
+![](later/generated_image8800.png)
+![](later/generated_image8900.png)
+![](later/generated_image900.png)
+![](later/generated_image9000.png)
+![](later/generated_image9100.png)
+![](later/generated_image9200.png)
+![](later/generated_image9300.png)
+![](later/generated_image9400.png)
+![](later/generated_image9500.png)
+![](later/generated_image9600.png)
+![](later/generated_image9700.png)
+![](later/generated_image9800.png)
+![](later/generated_image9900.png)
